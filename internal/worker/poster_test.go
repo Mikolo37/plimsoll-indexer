@@ -220,13 +220,55 @@ func TestPosterReportsAChainReadFailure(t *testing.T) {
 	}
 }
 
-func TestPosterSkipsAssetsHorizonDoesNotKnow(t *testing.T) {
+// TestPosterPostsZeroSnapshotForAssetWithNoHolders proves that an asset with
+// no trustlines gets a zero snapshot posted (u32::MAX bps = fully covered)
+// rather than being left as 'unknown'. Fixes #46.
+func TestPosterPostsZeroSnapshotForAssetWithNoHolders(t *testing.T) {
 	c := &fakeContracts{supply: xdr.ScVal{Type: xdr.ScValTypeScvVoid}}
 	h := &fakeHorizon{err: horizon.ErrAssetNotFound}
 	if err := newPoster(h, c, &fakeBreakdowns{}).Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	if len(c.invoked) != 1 || c.invoked[0] != "post_supply" {
+		t.Fatalf("invoked %v, want one post_supply for the zero snapshot", c.invoked)
+	}
+	// Confirm amount arg is zero.
+	amount, err := soroban.AsI128(c.postArgs[0][2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if amount.Sign() != 0 {
+		t.Errorf("posted amount = %s, want 0", amount)
+	}
+}
+
+// TestPosterRepostsZeroSnapshotForFormerlyHeldAsset proves that an asset whose
+// supply has since dropped to zero (ErrAssetNotFound) is reposted when the
+// existing on-chain snapshot is stale. Fixes #46.
+func TestPosterRepostsZeroSnapshotForFormerlyHeldAsset(t *testing.T) {
+	zero := zeroBreakdown("PUSD", "GISSUER")
+	db := &fakeBreakdowns{have: map[string]bool{zero.Hash(): true}}
+	c := &fakeContracts{supply: onChainSnapshot(t, 0, 5_469_000, postedAt.Add(-7*time.Hour), zero.Hash())}
+	h := &fakeHorizon{err: horizon.ErrAssetNotFound}
+	if err := newPoster(h, c, db).Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.invoked) != 1 || c.invoked[0] != "post_supply" {
+		t.Fatalf("invoked %v, want one post_supply when the zero snapshot is stale", c.invoked)
+	}
+}
+
+// TestPosterSkipsZeroSnapshotWhenFresh proves that REPOST_AFTER applies to
+// zero snapshots the same way it does to non-zero ones. Fixes #46.
+func TestPosterSkipsZeroSnapshotWhenFresh(t *testing.T) {
+	zero := zeroBreakdown("PUSD", "GISSUER")
+	db := &fakeBreakdowns{have: map[string]bool{zero.Hash(): true}}
+	c := &fakeContracts{supply: onChainSnapshot(t, 0, 5_469_000, postedAt.Add(-time.Minute), zero.Hash())}
+	h := &fakeHorizon{err: horizon.ErrAssetNotFound}
+	if err := newPoster(h, c, db).Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if len(c.invoked) != 0 {
-		t.Errorf("invoked %v, want nothing", c.invoked)
+		t.Errorf("invoked %v, want nothing (zero snapshot is fresh)", c.invoked)
 	}
 }

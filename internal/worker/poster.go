@@ -131,12 +131,24 @@ func (p *Poster) Run(ctx context.Context) error {
 
 func (p *Poster) postOne(ctx context.Context, sac, code, issuer string) error {
 	b, err := p.Horizon.Supply(ctx, code, issuer)
-	if errors.Is(err, horizon.ErrAssetNotFound) {
-		p.Log.Debug("asset has no holders yet", "code", code)
-		return nil
-	}
-	if err != nil {
+	zeroSupply := errors.Is(err, horizon.ErrAssetNotFound)
+	if zeroSupply {
+		// No trustlines exist yet. The contract defines zero circulating supply
+		// as u32::MAX bps (fully covered), so post a zero snapshot rather than
+		// leaving the asset as 'unknown'. REPOST_AFTER still applies.
+		b = zeroBreakdown(code, issuer)
+	} else if err != nil {
 		return err
+	}
+
+	// Get the chain head early: a zero breakdown has no ledger from Horizon,
+	// and the staleness guard and the contract's ledger check both need it.
+	rpcLatest, err := p.RPC.GetLatestLedger(ctx)
+	if err != nil {
+		return fmt.Errorf("getLatestLedger: %w", err)
+	}
+	if b.Ledger == 0 || b.Ledger > rpcLatest.Sequence {
+		b.Ledger = rpcLatest.Sequence
 	}
 
 	last, err := p.onChainSupply(ctx, sac)
@@ -157,24 +169,16 @@ func (p *Poster) postOne(ctx context.Context, sac, code, issuer string) error {
 			return nil
 		}
 		if b.Ledger <= last.Ledger {
-			return nil // Horizon has not moved past the posted snapshot yet.
+			return nil // chain has not advanced past the posted snapshot yet.
 		}
 	}
 
-	// Checked here rather than on every fetch: this is the point where the
-	// figure stops being an observation and becomes something this indexer
-	// signs.
-	if err := p.crossCheck(ctx, b, code, issuer); err != nil {
-		return err
-	}
-
-	// The contract rejects a ledger newer than the one it is executing in.
-	rpcLatest, err := p.RPC.GetLatestLedger(ctx)
-	if err != nil {
-		return fmt.Errorf("getLatestLedger: %w", err)
-	}
-	if b.Ledger > rpcLatest.Sequence {
-		b.Ledger = rpcLatest.Sequence
+	// Cross-check only makes sense when there is real supply to verify; a zero
+	// snapshot has nothing a second Horizon can confirm or deny.
+	if !zeroSupply {
+		if err := p.crossCheck(ctx, b, code, issuer); err != nil {
+			return err
+		}
 	}
 
 	hash := b.Hash()
@@ -205,6 +209,21 @@ func (p *Poster) postOne(ctx context.Context, sac, code, issuer string) error {
 	}
 	p.Log.Info("posted supply", "code", code, "amount", b.Total, "at_ledger", b.Ledger, "tx", res.TxHash)
 	return nil
+}
+
+// zeroBreakdown builds an all-zero supply breakdown for an asset that Horizon
+// has no record of (no trustlines created yet, or all trustlines removed).
+func zeroBreakdown(code, issuer string) horizon.Breakdown {
+	return horizon.Breakdown{
+		Asset:                           code + ":" + issuer,
+		Authorized:                      "0",
+		AuthorizedToMaintainLiabilities: "0",
+		Unauthorized:                    "0",
+		ClaimableBalances:               "0",
+		LiquidityPools:                  "0",
+		Contracts:                       "0",
+		Total:                           "0",
+	}
 }
 
 // onChainSupply reads the snapshot the coverage ledger currently holds for sac.

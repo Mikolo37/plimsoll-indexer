@@ -220,6 +220,66 @@ func TestPosterReportsAChainReadFailure(t *testing.T) {
 	}
 }
 
+// --- balance-warning tests (#44) -------------------------------------------
+
+type fakeBalanceChecker struct {
+	bal int64
+	err error
+}
+
+func (f *fakeBalanceChecker) NativeBalance(_ context.Context, _ string) (int64, error) {
+	return f.bal, f.err
+}
+
+func TestPosterLogsWarningWhenBalanceBelowThreshold(t *testing.T) {
+	var buf strings.Builder
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	b := testBreakdown("9999000000000", 5_469_000)
+	c := &fakeContracts{supply: xdr.ScVal{Type: xdr.ScValTypeScvVoid}}
+	p := newPoster(&fakeHorizon{breakdown: b}, c, &fakeBreakdowns{})
+	p.Log = log
+	p.BalanceChecker = &fakeBalanceChecker{bal: 500_000}  // 0.05 XLM
+	p.LowBalanceStroops = 10_000_000                       // 1 XLM threshold
+	if err := p.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "balance is low") {
+		t.Errorf("expected a low-balance warning, got log: %s", buf.String())
+	}
+}
+
+func TestPosterNoWarningWhenBalanceAboveThreshold(t *testing.T) {
+	var buf strings.Builder
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	b := testBreakdown("9999000000000", 5_469_000)
+	c := &fakeContracts{supply: xdr.ScVal{Type: xdr.ScValTypeScvVoid}}
+	p := newPoster(&fakeHorizon{breakdown: b}, c, &fakeBreakdowns{})
+	p.Log = log
+	p.BalanceChecker = &fakeBalanceChecker{bal: 50_000_000} // 5 XLM
+	p.LowBalanceStroops = 10_000_000                         // 1 XLM threshold
+	if err := p.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "balance is low") {
+		t.Errorf("unexpected low-balance warning, got log: %s", buf.String())
+	}
+}
+
+func TestPosterContinuesWhenBalanceCheckFails(t *testing.T) {
+	b := testBreakdown("9999000000000", 5_469_000)
+	c := &fakeContracts{supply: xdr.ScVal{Type: xdr.ScValTypeScvVoid}}
+	p := newPoster(&fakeHorizon{breakdown: b}, c, &fakeBreakdowns{})
+	p.BalanceChecker = &fakeBalanceChecker{err: errors.New("horizon timeout")}
+	p.LowBalanceStroops = 10_000_000
+	// Should not return an error — balance check failure is advisory only.
+	if err := p.Run(context.Background()); err != nil {
+		t.Fatalf("Run returned an error after balance check failure: %v", err)
+	}
+	if len(c.invoked) != 1 {
+		t.Errorf("expected posting to continue despite balance error, invoked: %v", c.invoked)
+	}
+}
+
 // TestPosterPostsZeroSnapshotForAssetWithNoHolders proves that an asset with
 // no trustlines gets a zero snapshot posted (u32::MAX bps = fully covered)
 // rather than being left as 'unknown'. Fixes #46.

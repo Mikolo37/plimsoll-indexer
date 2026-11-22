@@ -81,6 +81,9 @@ type Config struct {
 	// ResourceFeeMarginPct is the percentage added to the simulated resource
 	// fee as headroom. Zero means no margin.
 	ResourceFeeMarginPct int64
+	// PosterLowBalanceStroops is the XLM balance (in stroops) below which the
+	// poster logs a warning on every tick. Zero disables the check.
+	PosterLowBalanceStroops int64
 }
 
 // Load reads the environment. Missing required values are reported together.
@@ -161,6 +164,7 @@ func Load() (Config, error) {
 		{"MAX_FEE_STROOPS", &c.MaxFeeStroops},
 		{"INCLUSION_FEE", &c.InclusionFee},
 		{"RESOURCE_FEE_MARGIN_PCT", &c.ResourceFeeMarginPct},
+		{"POSTER_LOW_BALANCE_STROOPS", &c.PosterLowBalanceStroops},
 	}
 	for _, f := range int64s {
 		if v := os.Getenv(f.name); v != "" {

@@ -81,6 +81,10 @@ type root struct {
 
 type account struct {
 	HomeDomain string `json:"home_domain"`
+	Balances   []struct {
+		AssetType string `json:"asset_type"`
+		Balance   string `json:"balance"`
+	} `json:"balances"`
 }
 
 // LatestLedger returns the newest ledger Horizon has ingested.
@@ -99,6 +103,25 @@ func (c *Client) HomeDomain(ctx context.Context, issuer string) (string, error) 
 		return "", fmt.Errorf("horizon account %s: %w", issuer, err)
 	}
 	return a.HomeDomain, nil
+}
+
+// NativeBalance returns the XLM balance of address in stroops (1 XLM = 10 000 000 stroops).
+// Returns 0 and ErrAssetNotFound when the account does not exist.
+func (c *Client) NativeBalance(ctx context.Context, address string) (int64, error) {
+	var a account
+	if err := c.get(ctx, "/accounts/"+url.PathEscape(address), &a); err != nil {
+		return 0, fmt.Errorf("horizon account %s: %w", address, err)
+	}
+	for _, b := range a.Balances {
+		if b.AssetType == "native" {
+			n, err := ParseAmount(b.Balance)
+			if err != nil {
+				return 0, fmt.Errorf("parse native balance: %w", err)
+			}
+			return n.Int64(), nil
+		}
+	}
+	return 0, nil
 }
 
 // Supply fetches the asset record and sums every bucket that is a claim on

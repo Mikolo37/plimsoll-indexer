@@ -28,6 +28,11 @@ type supplySource interface {
 	Supply(ctx context.Context, code, issuer string) (horizon.Breakdown, error)
 }
 
+// accountBalance is used to check the poster account's XLM reserve before posting.
+type accountBalance interface {
+	NativeBalance(ctx context.Context, address string) (int64, error)
+}
+
 // breakdownStore is the storage surface the poster needs.
 type breakdownStore interface {
 	ListAssets(ctx context.Context) ([]coverage.Asset, error)
@@ -59,6 +64,13 @@ type Poster struct {
 	RepostAfter  time.Duration
 	Log          *slog.Logger
 	Now          func() time.Time
+
+	// BalanceChecker, when non-nil, is queried at the start of every Run tick.
+	// If the poster's native XLM balance is below LowBalanceStroops a warning
+	// is logged but posting continues. This is advisory-only: the poster does
+	// not stop when the balance is low.
+	BalanceChecker    accountBalance
+	LowBalanceStroops int64
 }
 
 // errSupplyDisagreement stops a post when two Horizons report different totals
@@ -116,6 +128,8 @@ func (p *Poster) crossCheck(ctx context.Context, b horizon.Breakdown, code, issu
 const crossCheckAttempts = 2
 
 func (p *Poster) Run(ctx context.Context) error {
+	p.checkBalance(ctx)
+
 	assets, err := p.Store.ListAssets(ctx)
 	if err != nil {
 		return fmt.Errorf("list assets: %w", err)
@@ -209,6 +223,27 @@ func (p *Poster) postOne(ctx context.Context, sac, code, issuer string) error {
 	}
 	p.Log.Info("posted supply", "code", code, "amount", b.Total, "at_ledger", b.Ledger, "tx", res.TxHash)
 	return nil
+}
+
+// checkBalance logs a warning when the poster account's XLM balance is below
+// the configured threshold. Errors are logged and ignored: a Horizon hiccup
+// must not stop posting.
+func (p *Poster) checkBalance(ctx context.Context) {
+	if p.BalanceChecker == nil || p.LowBalanceStroops <= 0 {
+		return
+	}
+	addr := p.Invoker.Address()
+	bal, err := p.BalanceChecker.NativeBalance(ctx, addr)
+	if err != nil {
+		p.Log.Warn("could not read poster account balance", "account", addr, "err", err)
+		return
+	}
+	if bal < p.LowBalanceStroops {
+		p.Log.Warn("poster account XLM balance is low; top it up to keep posting",
+			"account", addr,
+			"balance_stroops", bal,
+			"threshold_stroops", p.LowBalanceStroops)
+	}
 }
 
 // zeroBreakdown builds an all-zero supply breakdown for an asset that Horizon

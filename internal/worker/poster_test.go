@@ -240,8 +240,8 @@ func TestPosterLogsWarningWhenBalanceBelowThreshold(t *testing.T) {
 	c := &fakeContracts{supply: xdr.ScVal{Type: xdr.ScValTypeScvVoid}}
 	p := newPoster(&fakeHorizon{breakdown: b}, c, &fakeBreakdowns{})
 	p.Log = log
-	p.BalanceChecker = &fakeBalanceChecker{bal: 500_000}  // 0.05 XLM
-	p.LowBalanceStroops = 10_000_000                       // 1 XLM threshold
+	p.BalanceChecker = &fakeBalanceChecker{bal: 500_000} // 0.05 XLM
+	p.LowBalanceStroops = 10_000_000                     // 1 XLM threshold
 	if err := p.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +258,7 @@ func TestPosterNoWarningWhenBalanceAboveThreshold(t *testing.T) {
 	p := newPoster(&fakeHorizon{breakdown: b}, c, &fakeBreakdowns{})
 	p.Log = log
 	p.BalanceChecker = &fakeBalanceChecker{bal: 50_000_000} // 5 XLM
-	p.LowBalanceStroops = 10_000_000                         // 1 XLM threshold
+	p.LowBalanceStroops = 10_000_000                        // 1 XLM threshold
 	if err := p.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}

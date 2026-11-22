@@ -35,6 +35,21 @@ type Invoker struct {
 	RPC        RPC
 	Signer     *keypair.Full
 	Passphrase string
+
+	// MaxFeeStroops is the absolute ceiling the invoker will sign per
+	// transaction. When the computed fee (inclusion fee + resource fee with
+	// margin) exceeds this value the call is refused with a clear error.
+	// Zero means no ceiling.
+	MaxFeeStroops int64
+
+	// InclusionFee is the per-operation base fee bid in stroops. Values below
+	// txnbuild.MinBaseFee are raised to that floor. Zero means MinBaseFee.
+	InclusionFee int64
+
+	// ResourceFeeMarginPct is the percentage added to the simulated resource
+	// fee as headroom. For example, 20 pads sim.MinResourceFee by 20 %.
+	// Zero means no margin.
+	ResourceFeeMarginPct int64
 }
 
 // Result of a successful invocation.
@@ -45,6 +60,27 @@ type Result struct {
 
 // Address is the account that signs and sources this invoker's calls.
 func (inv *Invoker) Address() string { return inv.Signer.Address() }
+
+// feeFor computes the fee to use for a transaction given its simulated minimum
+// resource fee. It applies the configured inclusion fee (floored at MinBaseFee)
+// and the resource-fee margin percentage, then checks the ceiling.
+func (inv *Invoker) feeFor(minResourceFee int64) (int64, error) {
+	inclusion := inv.InclusionFee
+	if inclusion < txnbuild.MinBaseFee {
+		inclusion = txnbuild.MinBaseFee
+	}
+	resource := minResourceFee
+	if inv.ResourceFeeMarginPct > 0 {
+		resource += resource * inv.ResourceFeeMarginPct / 100
+	}
+	total := inclusion + resource
+	if inv.MaxFeeStroops > 0 && total > inv.MaxFeeStroops {
+		return 0, fmt.Errorf(
+			"soroban: simulated fee %d stroops exceeds ceiling %d; refusing to sign",
+			total, inv.MaxFeeStroops)
+	}
+	return total, nil
+}
 
 // Read simulates fn on contractID with the signer as the source account.
 func (inv *Invoker) Read(ctx context.Context, contractID, fn string, args []xdr.ScVal) (xdr.ScVal, error) {
@@ -206,13 +242,17 @@ func (inv *Invoker) attempt(ctx context.Context, contractID, fn string, args []x
 	}
 
 	// 2. Rebuild with resources and auth, sign and send.
+	fee, err := inv.feeFor(sim.MinResourceFee)
+	if err != nil {
+		return Result{}, nil, err
+	}
 	op := &txnbuild.InvokeHostFunction{
 		HostFunction:  hostFn,
 		SourceAccount: inv.Signer.Address(),
 		Auth:          auth,
 		Ext:           xdr.TransactionExt{V: 1, SorobanData: &data},
 	}
-	tx, err := build(inv.Signer.Address(), seq, txnbuild.MinBaseFee+sim.MinResourceFee, op)
+	tx, err := build(inv.Signer.Address(), seq, fee, op)
 	if err != nil {
 		return Result{}, nil, err
 	}
@@ -233,11 +273,15 @@ func (inv *Invoker) restore(ctx context.Context, preamble *protocol.RestorePream
 	}
 	// The preamble already carries the footprint and resources for the restore,
 	// so this needs no simulation of its own.
+	fee, err := inv.feeFor(preamble.MinResourceFee)
+	if err != nil {
+		return fmt.Errorf("restore fee: %w", err)
+	}
 	op := &txnbuild.RestoreFootprint{
 		SourceAccount: inv.Signer.Address(),
 		Ext:           xdr.TransactionExt{V: 1, SorobanData: &data},
 	}
-	tx, err := build(inv.Signer.Address(), seq, txnbuild.MinBaseFee+preamble.MinResourceFee, op)
+	tx, err := build(inv.Signer.Address(), seq, fee, op)
 	if err != nil {
 		return err
 	}

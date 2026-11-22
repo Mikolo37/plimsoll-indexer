@@ -229,6 +229,125 @@ func TestInvokeReportsSimulationErrors(t *testing.T) {
 	}
 }
 
+// TestFeeFor verifies the fee computation helper: inclusion floor, margin, and ceiling.
+func TestFeeFor(t *testing.T) {
+	const minResource int64 = 1000
+	tests := []struct {
+		name      string
+		maxFee    int64
+		inclusion int64
+		marginPct int64
+		wantFee   int64
+		wantErr   bool
+	}{
+		{
+			name:    "defaults: MinBaseFee + minResourceFee",
+			wantFee: txnbuild.MinBaseFee + minResource,
+		},
+		{
+			name:      "custom inclusion fee above floor",
+			inclusion: 500,
+			wantFee:   500 + minResource,
+		},
+		{
+			name:      "inclusion fee below MinBaseFee is floored",
+			inclusion: 10,
+			wantFee:   txnbuild.MinBaseFee + minResource,
+		},
+		{
+			name:      "resource fee margin pads the resource portion",
+			marginPct: 20,
+			wantFee:   txnbuild.MinBaseFee + minResource + minResource*20/100,
+		},
+		{
+			name:    "total under ceiling is accepted",
+			maxFee:  txnbuild.MinBaseFee + minResource + 1,
+			wantFee: txnbuild.MinBaseFee + minResource,
+		},
+		{
+			name:    "total equal to ceiling is accepted",
+			maxFee:  txnbuild.MinBaseFee + minResource,
+			wantFee: txnbuild.MinBaseFee + minResource,
+		},
+		{
+			name:    "total over ceiling returns error",
+			maxFee:  txnbuild.MinBaseFee + minResource - 1,
+			wantErr: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			inv := &Invoker{
+				MaxFeeStroops:        tc.maxFee,
+				InclusionFee:         tc.inclusion,
+				ResourceFeeMarginPct: tc.marginPct,
+			}
+			got, err := inv.feeFor(minResource)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("feeFor returned %d, expected an error", got)
+				}
+				if !strings.Contains(err.Error(), "exceeds ceiling") {
+					t.Errorf("error does not mention ceiling: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("feeFor: %v", err)
+			}
+			if got != tc.wantFee {
+				t.Errorf("feeFor = %d, want %d", got, tc.wantFee)
+			}
+		})
+	}
+}
+
+// TestInvokerRespectsFeeSettings proves the InclusionFee and ResourceFeeMarginPct
+// settings are reflected in the fee baked into the signed transaction.
+func TestInvokerRespectsFeeSettings(t *testing.T) {
+	const margin int64 = 20
+	f := &fakeRPC{t: t, sims: []protocol.SimulateTransactionResponse{okSim(t)}, seq: 1}
+	inv := &Invoker{
+		RPC:                  f,
+		Signer:               keypair.MustRandom(),
+		Passphrase:           testPassphrase,
+		InclusionFee:         300,
+		ResourceFeeMarginPct: margin,
+	}
+	if _, err := inv.Invoke(context.Background(), cAddr, "post_supply", nil); err != nil {
+		t.Fatalf("invoke: %v", err)
+	}
+	// feeFor returns inclusion + paddedMinResource.
+	// txnbuild: envelope fee = BaseFee*1op + SorobanData.ResourceFee.
+	paddedMin := callMinResourceFee + callMinResourceFee*margin/100
+	wantFee := int64(300) + paddedMin + callResourceFee
+	if f.sent[0].fee != wantFee {
+		t.Errorf("envelope fee = %d, want %d", f.sent[0].fee, wantFee)
+	}
+}
+
+// TestInvokerRefusesWhenFeeExceedsCeiling proves nothing is sent and an error
+// is returned when the computed fee would exceed MaxFeeStroops.
+func TestInvokerRefusesWhenFeeExceedsCeiling(t *testing.T) {
+	f := &fakeRPC{t: t, sims: []protocol.SimulateTransactionResponse{okSim(t)}, seq: 1}
+	inv := &Invoker{
+		RPC:           f,
+		Signer:        keypair.MustRandom(),
+		Passphrase:    testPassphrase,
+		MaxFeeStroops: 1, // impossibly low ceiling
+	}
+	_, err := inv.Invoke(context.Background(), cAddr, "post_supply", nil)
+	if err == nil {
+		t.Fatal("expected an error when fee exceeds ceiling")
+	}
+	if !strings.Contains(err.Error(), "exceeds ceiling") {
+		t.Errorf("error does not mention ceiling: %v", err)
+	}
+	if len(f.sent) != 0 {
+		t.Error("nothing should be sent when the fee exceeds the ceiling")
+	}
+}
+
 // Reader holds no key, so a read must reach the contract without one: it is
 // what lets reconciliation run on an instance with nothing to sign with.
 func TestReaderNeedsNoKey(t *testing.T) {

@@ -71,6 +71,16 @@ type Config struct {
 	// idle services (Render's free tier) keeps this one, and its poster, up.
 	KeepAwakeURL      string
 	KeepAwakeInterval time.Duration
+
+	// MaxFeeStroops is the absolute ceiling the invoker will sign per
+	// transaction. Zero means no ceiling.
+	MaxFeeStroops int64
+	// InclusionFee is the per-operation base fee bid in stroops. Zero means
+	// MinBaseFee (100 stroops).
+	InclusionFee int64
+	// ResourceFeeMarginPct is the percentage added to the simulated resource
+	// fee as headroom. Zero means no margin.
+	ResourceFeeMarginPct int64
 }
 
 // Load reads the environment. Missing required values are reported together.
@@ -141,6 +151,25 @@ func Load() (Config, error) {
 	for _, o := range strings.Split(envOr("CORS_ORIGINS", "*"), ",") {
 		if o = strings.TrimSpace(o); o != "" {
 			c.CORSOrigins = append(c.CORSOrigins, o)
+		}
+	}
+
+	int64s := []struct {
+		name string
+		dst  *int64
+	}{
+		{"MAX_FEE_STROOPS", &c.MaxFeeStroops},
+		{"INCLUSION_FEE", &c.InclusionFee},
+		{"RESOURCE_FEE_MARGIN_PCT", &c.ResourceFeeMarginPct},
+	}
+	for _, f := range int64s {
+		if v := os.Getenv(f.name); v != "" {
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", f.name, err))
+				continue
+			}
+			*f.dst = n
 		}
 	}
 

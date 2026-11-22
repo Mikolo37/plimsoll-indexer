@@ -19,6 +19,8 @@ import (
 	"github.com/plimsoll-protocol/plimsoll-indexer/internal/store"
 )
 
+var _ postLocker = (*fakeLock)(nil)
+
 const (
 	testSAC    = "CCHPT4TEJDPZQDSUVW3NP6A35ROGV4WEFZKT45SKWYCFZSUB7R5HIM7S"
 	testPoster = "GDACI55IMI5DDZWMZ2EAXWK57AV75VE4626YYBAHQJYDV7QFPNNFK6HJ"
@@ -277,6 +279,50 @@ func TestPosterContinuesWhenBalanceCheckFails(t *testing.T) {
 	}
 	if len(c.invoked) != 1 {
 		t.Errorf("expected posting to continue despite balance error, invoked: %v", c.invoked)
+	}
+}
+
+// --- advisory lock tests (#45) ---------------------------------------------
+
+type fakeLock struct {
+	acquired bool // true = lock is free and can be acquired
+	unlocked int
+}
+
+func (f *fakeLock) TryPostLock(_ context.Context) (func(), error) {
+	if !f.acquired {
+		return nil, store.ErrLockNotAcquired
+	}
+	return func() { f.unlocked++ }, nil
+}
+
+func TestPosterSkipsWhenLockIsHeld(t *testing.T) {
+	b := testBreakdown("9999000000000", 5_469_000)
+	c := &fakeContracts{supply: xdr.ScVal{Type: xdr.ScValTypeScvVoid}}
+	p := newPoster(&fakeHorizon{breakdown: b}, c, &fakeBreakdowns{})
+	p.Lock = &fakeLock{acquired: false}
+	if err := p.Run(context.Background()); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(c.invoked) != 0 {
+		t.Errorf("posted %v when lock was held; expected nothing posted", c.invoked)
+	}
+}
+
+func TestPosterPostsWhenLockIsAcquired(t *testing.T) {
+	b := testBreakdown("9999000000000", 5_469_000)
+	c := &fakeContracts{supply: xdr.ScVal{Type: xdr.ScValTypeScvVoid}}
+	lock := &fakeLock{acquired: true}
+	p := newPoster(&fakeHorizon{breakdown: b}, c, &fakeBreakdowns{})
+	p.Lock = lock
+	if err := p.Run(context.Background()); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(c.invoked) != 1 {
+		t.Errorf("invoked %v, want one post when lock is acquired", c.invoked)
+	}
+	if lock.unlocked != 1 {
+		t.Errorf("unlock called %d times, want 1", lock.unlocked)
 	}
 }
 

@@ -21,6 +21,10 @@ var schema string
 
 var ErrNotFound = errors.New("not found")
 
+// ErrLockNotAcquired is returned by TryPostLock when another poster instance
+// already holds the advisory lock.
+var ErrLockNotAcquired = errors.New("poster lock already held by another instance")
+
 type Store struct {
 	pool *pgxpool.Pool
 }
@@ -346,6 +350,39 @@ func mustBig(s string) *big.Int {
 		return new(big.Int)
 	}
 	return n
+}
+
+// ---- advisory lock --------------------------------------------------------
+
+// posterLockKey is the Postgres advisory lock key for the supply poster.
+// Fixed value; must not collide with any other advisory lock in the database.
+const posterLockKey = int64(0x706c696d736f6c6c) // "plimsoll" in hex ASCII
+
+// TryPostLock acquires a Postgres session-level advisory lock that guarantees
+// only one poster instance posts at a time. It returns an unlock function that
+// must be called when the lock is no longer needed. If another instance already
+// holds the lock it returns ErrLockNotAcquired; the caller should skip posting
+// for this tick and try again next time.
+func (s *Store) TryPostLock(ctx context.Context) (func(), error) {
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire connection for poster lock: %w", err)
+	}
+	var acquired bool
+	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, posterLockKey).Scan(&acquired); err != nil {
+		conn.Release()
+		return nil, fmt.Errorf("pg_try_advisory_lock: %w", err)
+	}
+	if !acquired {
+		conn.Release()
+		return nil, ErrLockNotAcquired
+	}
+	unlock := func() {
+		unlockCtx := context.Background()
+		_, _ = conn.Exec(unlockCtx, `SELECT pg_advisory_unlock($1)`, posterLockKey)
+		conn.Release()
+	}
+	return unlock, nil
 }
 
 // ---- reconciliation -------------------------------------------------------

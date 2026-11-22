@@ -33,6 +33,12 @@ type accountBalance interface {
 	NativeBalance(ctx context.Context, address string) (int64, error)
 }
 
+// postLocker acquires a distributed lock so only one poster instance posts at a
+// time. The returned function releases the lock.
+type postLocker interface {
+	TryPostLock(ctx context.Context) (func(), error)
+}
+
 // breakdownStore is the storage surface the poster needs.
 type breakdownStore interface {
 	ListAssets(ctx context.Context) ([]coverage.Asset, error)
@@ -71,6 +77,12 @@ type Poster struct {
 	// not stop when the balance is low.
 	BalanceChecker    accountBalance
 	LowBalanceStroops int64
+
+	// Lock, when non-nil, is acquired at the start of each Run tick. If the
+	// lock cannot be acquired (another instance already holds it) Run logs at
+	// Info and returns nil. This prevents duplicate posts when multiple
+	// instances run against the same database.
+	Lock postLocker
 }
 
 // errSupplyDisagreement stops a post when two Horizons report different totals
@@ -128,6 +140,18 @@ func (p *Poster) crossCheck(ctx context.Context, b horizon.Breakdown, code, issu
 const crossCheckAttempts = 2
 
 func (p *Poster) Run(ctx context.Context) error {
+	if p.Lock != nil {
+		unlock, err := p.Lock.TryPostLock(ctx)
+		if errors.Is(err, store.ErrLockNotAcquired) {
+			p.Log.Info("poster lock held by another instance; skipping this tick")
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("poster lock: %w", err)
+		}
+		defer unlock()
+	}
+
 	p.checkBalance(ctx)
 
 	assets, err := p.Store.ListAssets(ctx)
